@@ -1,4 +1,4 @@
-# app.py (updated: robust placeholder replacement across runs + headers/footers)
+# app.py (updated: extra placeholders + "Generate Term Sheet" button)
 import streamlit as st
 from docx import Document
 import io
@@ -17,7 +17,6 @@ def replace_text_in_paragraphs_full(doc, placeholder, replacement):
     for para in doc.paragraphs:
         if placeholder in para.text:
             new_text = para.text.replace(placeholder, str(replacement))
-            # overwrite paragraph text (this resets runs)
             para.clear()
             para.add_run(new_text)
 
@@ -124,83 +123,110 @@ def insert_table_after_paragraph(doc, paragraph, data, col_names=None, preferred
 # -------------------- UI & inputs --------------------
 
 st.markdown("**Instructions:** Upload your Word template (.docx) containing placeholders: "
-            "`{{ClientName}}`, `{{Strike}}`, `{{Spot}}`, and `{{ScenarioTable}}`.")
+            "`{{ClientName}}`, `{{ValuationDate}}`, `{{MaturityDate}}`, `{{Spot}}`, `{{Strike}}`, `{{Premium}}`, "
+            "`{{Notional}}`, `{{ImpliedVol}}`, and `{{ScenarioTable}}`.")
 
 st.sidebar.header("Inputs")
 client_name = st.sidebar.text_input("Client name", value="ACME Ltd.")
+valuation_date = st.sidebar.date_input("Valuation date", value=datetime.date.today())
+maturity_date = st.sidebar.date_input("Maturity date", value=(datetime.date.today() + datetime.timedelta(days=30)))
 strike = st.sidebar.number_input("Strike", value=80.0, step=0.5, format="%.2f")
 spot = st.sidebar.number_input("Spot (current)", value=78.0, step=0.5, format="%.2f")
+premium = st.sidebar.number_input("Premium", value=0.0, step=0.01, format="%.4f")
+notional = st.sidebar.number_input("Notional", value=1000000.0, step=1000.0, format="%.2f")
+implied_vol = st.sidebar.number_input("Implied vol (in %)", value=12.0, step=0.1, format="%.2f")
+
 min_spot = st.sidebar.number_input("Scenario: min spot", value=max(0.0, strike - 40.0), step=0.5, format="%.2f")
 max_spot = st.sidebar.number_input("Scenario: max spot", value=strike + 40.0, step=0.5, format="%.2f")
 step_spot = st.sidebar.number_input("Scenario step", value=2.0, step=0.1, format="%.2f")
+
 template_file = st.file_uploader("Upload Word template (.docx)", type=["docx"])
 
 st.write("### Preview inputs")
 st.write(f"**Client**: {client_name}  •  **Strike**: {strike}  •  **Spot**: {spot}")
+st.write(f"Valuation date: {valuation_date}  •  Maturity date: {maturity_date}")
+st.write(f"Premium: {premium}  •  Notional: {notional}  •  Implied vol: {implied_vol}%")
 st.write(f"Scenario from {min_spot} to {max_spot} step {step_spot}")
 
 if not template_file:
     st.warning("Upload a Word template file (.docx) with placeholders to enable document generation.")
     st.stop()
 
-# Load the template into python-docx Document
-try:
-    template_doc = Document(template_file)
-except Exception as e:
-    st.error(f"Failed to read the uploaded docx template: {e}")
-    st.stop()
+# Only generate when user clicks button
+if st.button("Generate Term Sheet"):
 
-# Build scenario data (Spot at maturity and payoff for a call)
-spots = []
-val = float(min_spot)
-max_sp = float(max_spot)
-s_step = float(step_spot) if step_spot > 0 else 1.0
-# generate discrete spots
-while val <= max_sp + 1e-9:
-    spots.append(round(val, 2))
-    val += s_step
+    # Load the template into python-docx Document
+    try:
+        template_doc = Document(template_file)
+    except Exception as e:
+        st.error(f"Failed to read the uploaded docx template: {e}")
+        st.stop()
 
-def call_payoff(spot_val, strike_val):
-    return round(max(0.0, spot_val - strike_val), 2)
+    # Build scenario data (Spot at maturity and payoff for a call)
+    spots = []
+    val = float(min_spot)
+    max_sp = float(max_spot)
+    s_step = float(step_spot) if step_spot > 0 else 1.0
+    # generate discrete spots
+    while val <= max_sp + 1e-9:
+        spots.append(round(val, 2))
+        val += s_step
 
-scenario_rows = []
-for s in spots:
-    payoff = call_payoff(s, strike)
-    scenario_rows.append([s, payoff])
+    def call_payoff(spot_val, strike_val):
+        return round(max(0.0, spot_val - strike_val), 2)
 
-# Replace simple placeholders (paragraphs, tables, headers/footers)
-placeholders = {
-    "{{ClientName}}": client_name,
-    "{{Strike}}": "{:.2f}".format(strike),
-    "{{Spot}}": "{:.2f}".format(spot),
-}
-for ph, val in placeholders.items():
-    replace_text_in_paragraphs_full(template_doc, ph, val)
-    replace_text_in_tables_full(template_doc, ph, val)
-    replace_in_headers_and_footers(template_doc, ph, val)
+    scenario_rows = []
+    for s in spots:
+        payoff = call_payoff(s, strike)
+        scenario_rows.append([s, payoff])
 
-# Insert scenario table at placeholder or append
-placeholder = "{{ScenarioTable}}"
-para = find_paragraph_with_placeholder(template_doc, placeholder)
-if para:
-    # remove placeholder text in that paragraph (operate on full text)
-    if placeholder in para.text:
-        new_text = para.text.replace(placeholder, "")
-        para.clear()
-        para.add_run(new_text)
-    insert_table_after_paragraph(template_doc, para, scenario_rows, col_names=["Spot at Maturity", "Payoff"])
+    # Prepare placeholder values (format dates and numeric display nicely)
+    placeholders = {
+        "{{ClientName}}": client_name,
+        "{{ValuationDate}}": valuation_date.strftime("%Y-%m-%d"),
+        "{{MaturityDate}}": maturity_date.strftime("%Y-%m-%d"),
+        "{{Strike}}": "{:.2f}".format(strike),
+        "{{Spot}}": "{:.2f}".format(spot),
+        "{{Premium}}": "{:.4f}".format(premium),
+        "{{Notional}}": "{:,.2f}".format(notional),
+        "{{ImpliedVol}}": "{:.2f}%".format(implied_vol),
+    }
+
+    # Replace placeholders in paragraphs, tables, headers/footers
+    for ph, val in placeholders.items():
+        replace_text_in_paragraphs_full(template_doc, ph, val)
+        replace_text_in_tables_full(template_doc, ph, val)
+        replace_in_headers_and_footers(template_doc, ph, val)
+
+    # Insert scenario table at placeholder or append
+    placeholder = "{{ScenarioTable}}"
+    para = find_paragraph_with_placeholder(template_doc, placeholder)
+    if para:
+        # remove placeholder text in that paragraph (operate on full text)
+        if placeholder in para.text:
+            new_text = para.text.replace(placeholder, "")
+            para.clear()
+            para.add_run(new_text)
+        insert_table_after_paragraph(template_doc, para, scenario_rows, col_names=["Spot at Maturity", "Payoff"])
+    else:
+        insert_table_after_paragraph(template_doc, template_doc.paragraphs[-1], scenario_rows, col_names=["Spot at Maturity", "Payoff"])
+        st.info("Placeholder {{ScenarioTable}} not found — scenario table appended at document end.")
+
+    # Save to bytes buffer and provide download
+    output = io.BytesIO()
+    template_doc.save(output)
+    output.seek(0)
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_client = client_name.replace(" ", "_")
+    filename = f"TermSheet_{safe_client}_{timestamp}.docx"
+
+    st.success("Document ready — click the button below to download.")
+    st.download_button(
+        label="Download Term Sheet (.docx)",
+        data=output.getvalue(),
+        file_name=filename,
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
 else:
-    insert_table_after_paragraph(template_doc, template_doc.paragraphs[-1], scenario_rows, col_names=["Spot at Maturity", "Payoff"])
-    st.info("Placeholder {{ScenarioTable}} not found — scenario table appended at document end.")
-
-# Save to bytes buffer and provide download
-output = io.BytesIO()
-template_doc.save(output)
-output.seek(0)
-
-timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-filename = f"TermSheet_{client_name.replace(' ', '_')}_{timestamp}.docx"
-
-st.success("Document ready — click the button below to download.")
-st.download_button(label="Download Term Sheet (.docx)", data=output.getvalue(),
-                   file_name=filename, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    st.info("Click **Generate Term Sheet** to create and download the document.")
