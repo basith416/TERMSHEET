@@ -1,34 +1,68 @@
-# app.py
+# app.py (updated: robust placeholder replacement across runs + headers/footers)
 import streamlit as st
 from docx import Document
 import io
 import datetime
-import pkgutil
 
 st.set_page_config(page_title="Term Sheet Generator", layout="wide")
 st.title("Term Sheet Generator — Word template + Scenario Table")
 
 # -------------------- helper functions --------------------
 
-def replace_text_in_paragraphs(doc, placeholder, replacement):
-    """Replace placeholder text in all paragraphs and runs (preserve runs where possible)."""
+def replace_text_in_paragraphs_full(doc, placeholder, replacement):
+    """
+    Replace placeholder text in all paragraphs by operating on the full paragraph.text.
+    Note: this replaces the paragraph runs with a single run (styling in that paragraph may be lost).
+    """
     for para in doc.paragraphs:
         if placeholder in para.text:
-            for run in para.runs:
-                if placeholder in run.text:
-                    run.text = run.text.replace(placeholder, str(replacement))
+            new_text = para.text.replace(placeholder, str(replacement))
+            # overwrite paragraph text (this resets runs)
+            para.clear()
+            para.add_run(new_text)
 
-def replace_text_in_tables(doc, placeholder, replacement):
-    """Replace placeholder text inside table cells (preserve paragraphs/runs)."""
+def replace_text_in_cell_paragraphs_full(cell, placeholder, replacement):
+    """Replace placeholder inside each paragraph in a single table cell."""
+    for para in cell.paragraphs:
+        if placeholder in para.text:
+            new_text = para.text.replace(placeholder, str(replacement))
+            para.clear()
+            para.add_run(new_text)
+
+def replace_text_in_tables_full(doc, placeholder, replacement):
+    """Replace placeholder text inside every table cell (full-text replacement)."""
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                # iterate paragraphs inside the cell and replace run-by-run
-                for para in cell.paragraphs:
-                    if placeholder in para.text:
-                        for run in para.runs:
-                            if placeholder in run.text:
-                                run.text = run.text.replace(placeholder, str(replacement))
+                replace_text_in_cell_paragraphs_full(cell, placeholder, replacement)
+
+def replace_in_headers_and_footers(doc, placeholder, replacement):
+    """Replace placeholders inside headers and footers as well (common place for templates)."""
+    for section in doc.sections:
+        header = section.header
+        footer = section.footer
+        # header paragraphs
+        for para in header.paragraphs:
+            if placeholder in para.text:
+                new_text = para.text.replace(placeholder, str(replacement))
+                para.clear()
+                para.add_run(new_text)
+        # header tables
+        for table in header.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    replace_text_in_cell_paragraphs_full(cell, placeholder, replacement)
+        # footer paragraphs
+        for para in footer.paragraphs:
+            if placeholder in para.text:
+                new_text = para.text.replace(placeholder, str(replacement))
+                para.clear()
+                para.add_run(new_text)
+        # footer tables
+        for table in footer.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    replace_text_in_cell_paragraphs_full(cell, placeholder, replacement)
 
 def find_paragraph_with_placeholder(doc, placeholder):
     """Return the paragraph object that contains the placeholder or None."""
@@ -42,6 +76,14 @@ def find_paragraph_with_placeholder(doc, placeholder):
                 for para in cell.paragraphs:
                     if placeholder in para.text:
                         return para
+    # search headers/footers
+    for section in doc.sections:
+        for para in section.header.paragraphs:
+            if placeholder in para.text:
+                return para
+        for para in section.footer.paragraphs:
+            if placeholder in para.text:
+                return para
     return None
 
 def insert_table_after_paragraph(doc, paragraph, data, col_names=None, preferred_style_name="Table Grid"):
@@ -59,7 +101,6 @@ def insert_table_after_paragraph(doc, paragraph, data, col_names=None, preferred
     try:
         table.style = preferred_style_name
     except Exception:
-        # skip style assignment if style name not found
         pass
 
     row_idx = 0
@@ -78,7 +119,6 @@ def insert_table_after_paragraph(doc, paragraph, data, col_names=None, preferred
     try:
         paragraph._p.addnext(table._tbl)
     except Exception:
-        # If moving fails, leave table appended at the end
         st.warning("Could not insert table at the placeholder location; table appended at the end.")
 
 # -------------------- UI & inputs --------------------
@@ -128,22 +168,26 @@ for s in spots:
     payoff = call_payoff(s, strike)
     scenario_rows.append([s, payoff])
 
-# Replace simple placeholders (paragraphs and tables)
-replace_text_in_paragraphs(template_doc, "{{ClientName}}", client_name)
-replace_text_in_paragraphs(template_doc, "{{Strike}}", "{:.2f}".format(strike))
-replace_text_in_paragraphs(template_doc, "{{Spot}}", "{:.2f}".format(spot))
-replace_text_in_tables(template_doc, "{{ClientName}}", client_name)
-replace_text_in_tables(template_doc, "{{Strike}}", "{:.2f}".format(strike))
-replace_text_in_tables(template_doc, "{{Spot}}", "{:.2f}".format(spot))
+# Replace simple placeholders (paragraphs, tables, headers/footers)
+placeholders = {
+    "{{ClientName}}": client_name,
+    "{{Strike}}": "{:.2f}".format(strike),
+    "{{Spot}}": "{:.2f}".format(spot),
+}
+for ph, val in placeholders.items():
+    replace_text_in_paragraphs_full(template_doc, ph, val)
+    replace_text_in_tables_full(template_doc, ph, val)
+    replace_in_headers_and_footers(template_doc, ph, val)
 
 # Insert scenario table at placeholder or append
 placeholder = "{{ScenarioTable}}"
 para = find_paragraph_with_placeholder(template_doc, placeholder)
 if para:
-    # remove placeholder text in that paragraph
-    for run in para.runs:
-        if placeholder in run.text:
-            run.text = run.text.replace(placeholder, "")
+    # remove placeholder text in that paragraph (operate on full text)
+    if placeholder in para.text:
+        new_text = para.text.replace(placeholder, "")
+        para.clear()
+        para.add_run(new_text)
     insert_table_after_paragraph(template_doc, para, scenario_rows, col_names=["Spot at Maturity", "Payoff"])
 else:
     insert_table_after_paragraph(template_doc, template_doc.paragraphs[-1], scenario_rows, col_names=["Spot at Maturity", "Payoff"])
