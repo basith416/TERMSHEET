@@ -6,39 +6,36 @@ import datetime
 import pkgutil
 
 st.set_page_config(page_title="Term Sheet Generator", layout="wide")
-
 st.title("Term Sheet Generator — Word template + Scenario Table")
 
-# --- Helper functions -----------------------------------------------------
+# -------------------- helper functions --------------------
 
 def replace_text_in_paragraphs(doc, placeholder, replacement):
-    """Replace placeholder text in all paragraphs and runs."""
+    """Replace placeholder text in all paragraphs and runs (preserve runs where possible)."""
     for para in doc.paragraphs:
         if placeholder in para.text:
-            # replace in runs to preserve styling where possible
             for run in para.runs:
                 if placeholder in run.text:
                     run.text = run.text.replace(placeholder, str(replacement))
 
 def replace_text_in_tables(doc, placeholder, replacement):
-    """Replace placeholder text inside table cells."""
+    """Replace placeholder text inside table cells (preserve paragraphs/runs)."""
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                if placeholder in cell.text:
-                    # simple approach: replace full cell.text preserving minimal formatting loss
-                    cell_text = cell.text.replace(placeholder, str(replacement))
-                    # clear cell and add a single paragraph with replaced text
-                    cell.clear()
-                    cell_para = cell.paragraphs[0]
-                    cell_para.add_run(cell_text)
+                # iterate paragraphs inside the cell and replace run-by-run
+                for para in cell.paragraphs:
+                    if placeholder in para.text:
+                        for run in para.runs:
+                            if placeholder in run.text:
+                                run.text = run.text.replace(placeholder, str(replacement))
 
 def find_paragraph_with_placeholder(doc, placeholder):
     """Return the paragraph object that contains the placeholder or None."""
     for para in doc.paragraphs:
         if placeholder in para.text:
             return para
-    # also search in tables (cells) and return the first cell paragraph if found
+    # search inside tables
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -47,19 +44,23 @@ def find_paragraph_with_placeholder(doc, placeholder):
                         return para
     return None
 
-# Note: python-docx doesn't have a public API to "insert table after paragraph" directly.
-# We use the low-level _p and table._tbl elements to move the created table next to the placeholder paragraph.
-def insert_table_after_paragraph(doc, paragraph, data, col_names=None):
+def insert_table_after_paragraph(doc, paragraph, data, col_names=None, preferred_style_name="Table Grid"):
     """
     Insert a table after the given paragraph.
     data: list of rows (each row is a list of cell values)
     col_names: optional list of header names
+    preferred_style_name: style to try to apply; if not present we skip style
     """
-    # create table at the end of document (we will move it)
+    # create table at end of document
     nrows = len(data) + (1 if col_names else 0)
     ncols = len(data[0]) if data else (len(col_names) if col_names else 1)
     table = doc.add_table(rows=nrows, cols=ncols)
-    table.style = 'Table Grid'
+    # try to set style safely (some templates may not have named styles)
+    try:
+        table.style = preferred_style_name
+    except Exception:
+        # skip style assignment if style name not found
+        pass
 
     row_idx = 0
     if col_names:
@@ -73,25 +74,18 @@ def insert_table_after_paragraph(doc, paragraph, data, col_names=None):
         for c, val in enumerate(row):
             cells[c].text = str(val)
 
-    # Move the table element to just after the paragraph
+    # attempt to move the table right after the paragraph
     try:
         paragraph._p.addnext(table._tbl)
-    except Exception as e:
-        # If moving fails for any reason, leave the table at the end and log
-        st.warning(f"Could not insert table at placeholder location; table appended at the end. ({e})")
+    except Exception:
+        # If moving fails, leave table appended at the end
+        st.warning("Could not insert table at the placeholder location; table appended at the end.")
 
-# small helper to clear cell content (python-docx lacks direct clear so we remove paragraphs)
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-def clear_cell(cell):
-    cell._tc.clear_content()
+# -------------------- UI & inputs --------------------
 
-# -------------------------------------------------------------------------
+st.markdown("**Instructions:** Upload your Word template (.docx) containing placeholders: "
+            "`{{ClientName}}`, `{{Strike}}`, `{{Spot}}`, and `{{ScenarioTable}}`.")
 
-st.markdown("**Instructions:** Upload your Word template (docx) containing placeholders: "
-            "`{{ClientName}}`, `{{Strike}}`, `{{Spot}}`, and `{{ScenarioTable}}` (for the table).")
-
-# Sidebar inputs
 st.sidebar.header("Inputs")
 client_name = st.sidebar.text_input("Client name", value="ACME Ltd.")
 strike = st.sidebar.number_input("Strike", value=80.0, step=0.5, format="%.2f")
@@ -116,16 +110,16 @@ except Exception as e:
     st.error(f"Failed to read the uploaded docx template: {e}")
     st.stop()
 
-# Build scenario data (Spot at maturity and payoff)
+# Build scenario data (Spot at maturity and payoff for a call)
 spots = []
 val = float(min_spot)
 max_sp = float(max_spot)
 s_step = float(step_spot) if step_spot > 0 else 1.0
+# generate discrete spots
 while val <= max_sp + 1e-9:
     spots.append(round(val, 2))
     val += s_step
 
-# compute payoff for a call
 def call_payoff(spot_val, strike_val):
     return round(max(0.0, spot_val - strike_val), 2)
 
@@ -134,7 +128,7 @@ for s in spots:
     payoff = call_payoff(s, strike)
     scenario_rows.append([s, payoff])
 
-# Replace simple placeholders
+# Replace simple placeholders (paragraphs and tables)
 replace_text_in_paragraphs(template_doc, "{{ClientName}}", client_name)
 replace_text_in_paragraphs(template_doc, "{{Strike}}", "{:.2f}".format(strike))
 replace_text_in_paragraphs(template_doc, "{{Spot}}", "{:.2f}".format(spot))
@@ -142,26 +136,24 @@ replace_text_in_tables(template_doc, "{{ClientName}}", client_name)
 replace_text_in_tables(template_doc, "{{Strike}}", "{:.2f}".format(strike))
 replace_text_in_tables(template_doc, "{{Spot}}", "{:.2f}".format(spot))
 
-# Insert scenario table at placeholder location, or append if not found
+# Insert scenario table at placeholder or append
 placeholder = "{{ScenarioTable}}"
 para = find_paragraph_with_placeholder(template_doc, placeholder)
 if para:
-    # remove the placeholder text from the paragraph first
+    # remove placeholder text in that paragraph
     for run in para.runs:
         if placeholder in run.text:
             run.text = run.text.replace(placeholder, "")
     insert_table_after_paragraph(template_doc, para, scenario_rows, col_names=["Spot at Maturity", "Payoff"])
 else:
-    # append at end
     insert_table_after_paragraph(template_doc, template_doc.paragraphs[-1], scenario_rows, col_names=["Spot at Maturity", "Payoff"])
     st.info("Placeholder {{ScenarioTable}} not found — scenario table appended at document end.")
 
-# Save to bytes buffer
+# Save to bytes buffer and provide download
 output = io.BytesIO()
 template_doc.save(output)
 output.seek(0)
 
-# Create a filename
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 filename = f"TermSheet_{client_name.replace(' ', '_')}_{timestamp}.docx"
 
